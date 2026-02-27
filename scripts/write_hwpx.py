@@ -582,6 +582,27 @@ def _fill_schedule_tbl(tbl, schedule_data, total_years):
                 if len(cells) > 1:
                     set_cell_text(cells[-1], '')
 
+    # ── Pass 3: renumber all cellAddr.rowAddr after insertions ───────────
+    # deepcopy'd rows inherit the original rowAddr; renumber sequentially
+    # to prevent HWP from treating them as corrupted/duplicate cells.
+    _renumber_row_addrs(tbl)
+
+
+def _renumber_row_addrs(tbl):
+    """Renumber cellAddr.rowAddr for all direct rows after row insertions.
+
+    Each cell's rowAddr must equal its actual row index within the table.
+    colAddr is NOT changed (column structure stays the same).
+    """
+    direct_rows = [c for c in tbl if c.tag == HP + 'tr']
+    for row_idx, row in enumerate(direct_rows):
+        for tc in row:
+            if tc.tag != HP + 'tc':
+                continue
+            addr_elem = tc.find(HP + 'cellAddr')
+            if addr_elem is not None:
+                addr_elem.set('rowAddr', str(row_idx))
+
 
 # =========================================================================
 # Main modification function
