@@ -419,6 +419,12 @@ def fill_yearly_contents(root, data):
 def fill_schedule_table(root, schedule_data, total_years):
     """Fill schedule table task names and results.
 
+    The schedule section paragraph contains a paragraph with two nested tables:
+      outer_tbl  → 1 row × 1 cell wrapper
+      inner_tbl  → the actual Gantt table with all rows
+
+    We must operate on inner_tbl (the LAST tbl in depth-first order).
+
     schedule_data: dict with 'year1', 'year2', 'year3' keys,
                    each a list of {'task': str, 'result': str}
     total_years: int (to fix N차년도 labels)
@@ -427,7 +433,6 @@ def fill_schedule_table(root, schedule_data, total_years):
     if schedule_section is None:
         return
 
-    # Find the table paragraph after schedule_section
     parent = schedule_section.getparent()
     if parent is None:
         return
@@ -436,73 +441,146 @@ def fill_schedule_table(root, schedule_data, total_years):
     sec_idx = siblings.index(schedule_section)
 
     for sib in siblings[sec_idx + 1:]:
-        # Look for embedded table in this paragraph
-        for tbl in sib.iter(HP + 'tbl'):
-            _fill_schedule_tbl(tbl, schedule_data, total_years)
+        all_tbls = list(sib.iter(HP + 'tbl'))
+        if all_tbls:
+            # The LAST table in depth-first order is the actual inner Gantt table
+            inner_tbl = all_tbls[-1]
+            _fill_schedule_tbl(inner_tbl, schedule_data, total_years)
             return
 
 
 def _fill_schedule_tbl(tbl, schedule_data, total_years):
-    """Fill rows in the schedule Gantt table."""
+    """Fill rows in the schedule Gantt table (inner table).
+
+    Table structure (template):
+      Row[0]  : 1 cell  = "1차 년도"          ← year header
+      Row[1]  : 3 cells = 추진내용|추진 일정|결과물  ← column headers (skip)
+      Row[2]  : 12 cells = 1..12              ← month numbers (skip)
+      Row[3]  : 26 cells = task row 1         ← cells[0]=task, cells[-1]=result
+      Row[4]  : 24 cells = continuation row   ← Gantt bars only (SKIP for text)
+      Row[5]  : 24 cells = continuation row   ← Gantt bars only (SKIP for text)
+      Row[6]  : 26 cells = task row 2         ← ...
+      ...
+      Row[30] : 1 cell  = "2차 년도"
+      Row[31-33] : 14 cells each = year2 task rows (cells[0]=task, cells[-1]=result)
+      Row[34] : 1 cell  = "N차년도"
+      Row[35-36] : 14 cells each = year3 task rows
+
+    Key insight:
+      - Year1 task rows: 26 cells  (24-cell rows are Gantt-bar-only rows → skip)
+      - Year2/3 task rows: 14 cells each
+    """
     year_label_map = {
         '1차 년도': 'year1',
         '2차 년도': 'year2',
-        f'{total_years}차년도': f'year{total_years}',
-        'N차년도': f'year{total_years}',
     }
-    # Also handle generic year3
-    year_label_map['3차년도'] = 'year3'
-    year_label_map['3차 년도'] = 'year3'
+    for yr in range(3, total_years + 1):
+        year_label_map[f'{yr}차년도'] = f'year{yr}'
+        year_label_map[f'{yr}차 년도'] = f'year{yr}'
+    year_label_map['N차년도'] = f'year{total_years}'
+    year_label_map['N차 년도'] = f'year{total_years}'
 
-    rows = list(tbl.findall('.//' + HP + 'tr'))
-    current_year_key = None
-    task_row_idx = 0
-    is_header_row = False
+    # ── Pass 1: collect sections ─────────────────────────────────────────
+    # Each section: (year_key, header_row_elem, [(row_elem, direct_cells), ...])
+    sections = []
+    current_year = None
+    current_header = None
+    current_task_rows = []
 
-    for row in rows:
-        cells = list(row.findall('.//' + HP + 'tc'))
+    # Use DIRECT children rows only (not recursive)
+    direct_rows = [c for c in tbl if c.tag == HP + 'tr']
+
+    for row in direct_rows:
+        # Use DIRECT children cells only
+        cells = [c for c in row if c.tag == HP + 'tc']
         if not cells:
             continue
 
         cell0_text = get_all_text(cells[0]).strip()
 
-        # Detect year label rows
-        matched_year = None
-        for label, key in year_label_map.items():
-            if label in cell0_text or cell0_text == label:
-                matched_year = key
-                break
+        # ── Year header rows (1 cell) ──
+        if len(cells) == 1:
+            matched = None
+            for label, key in year_label_map.items():
+                if label in cell0_text:
+                    matched = key
+                    break
+            if matched:
+                if current_year is not None:
+                    sections.append((current_year, current_header, current_task_rows))
+                current_year = matched
+                current_header = row
+                current_task_rows = []
+                continue
 
-        if matched_year:
-            current_year_key = matched_year
-            task_row_idx = 0
-            is_header_row = True
-            # Fix N차년도 in cell text
-            if 'N차년도' in cell0_text:
-                set_cell_text(cells[0], cell0_text.replace('N차년도', f'{total_years}차년도'))
+        # ── Column header rows (추진내용 / 결과물) ──
+        if cell0_text in ('추진내용', '추진 일정', '결과물'):
             continue
 
-        # Skip header rows (추진내용, 1, 2, 3, ... header)
-        if cell0_text in ('추진내용', '추진 일정', '결과물', '1', '2', '3',
-                          '4', '5', '6', '7', '8', '9', '10', '11', '12'):
-            is_header_row = True
+        # ── Month-number header rows (12 cells, all digits) ──
+        if len(cells) == 12 and any(get_all_text(c).strip().isdigit() for c in cells):
             continue
 
-        # Empty task rows
-        if current_year_key is None:
-            continue
+        if current_year is not None:
+            current_task_rows.append((row, cells))
 
-        tasks = schedule_data.get(current_year_key, [])
-        if task_row_idx < len(tasks):
-            task = tasks[task_row_idx]
-            # First cell = task name
-            if cells:
+    if current_year is not None:
+        sections.append((current_year, current_header, current_task_rows))
+
+    # ── Pass 2: fix headers & fill / clone task rows ─────────────────────
+    for year_key, header_row, task_rows in sections:
+        # Fix N차년도 label in header cell
+        hdr_cells = [c for c in header_row if c.tag == HP + 'tc']
+        if hdr_cells:
+            hdr_text = get_all_text(hdr_cells[0]).strip()
+            if 'N차년도' in hdr_text:
+                set_cell_text(hdr_cells[0],
+                              hdr_text.replace('N차년도', f'{total_years}차년도'))
+
+        tasks = schedule_data.get(year_key, [])
+
+        # ── Determine writable rows ──
+        if year_key == 'year1':
+            # Only 26-cell rows are task rows; 24-cell rows are Gantt-only
+            writable = [(r, c) for r, c in task_rows if len(c) == 26]
+        else:
+            # year2, year3: all collected rows are task rows (14 cells each)
+            writable = task_rows
+
+        # ── Clone rows if we need more than available ──
+        if tasks and task_rows and len(writable) < len(tasks):
+            needed = len(tasks) - len(writable)
+            template_row, template_cells = task_rows[-1]
+            parent_tbl = template_row.getparent()
+            if parent_tbl is not None:
+                last_row = template_row
+                for _ in range(needed):
+                    new_row = copy.deepcopy(template_row)
+                    # Clear all text in the cloned row
+                    for t in new_row.iter(HP + 't'):
+                        t.text = ''
+                    # Remove linesegarray caches
+                    for lsa in new_row.findall('.//' + HP + 'linesegarray'):
+                        lsa.getparent().remove(lsa)
+                    last_idx = list(parent_tbl).index(last_row)
+                    parent_tbl.insert(last_idx + 1, new_row)
+                    last_row = new_row
+                    new_cells = [c for c in new_row if c.tag == HP + 'tc']
+                    writable.append((new_row, new_cells))
+
+        # ── Fill writable rows ──
+        for i, (row, cells) in enumerate(writable):
+            strip_linesegarray(row)
+            if i < len(tasks):
+                task = tasks[i]
                 set_cell_text(cells[0], task.get('task', ''))
-            # Last non-empty-header cell = result
-            # Find the result column (typically last column)
-            if len(cells) > 1:
-                set_cell_text(cells[-1], task.get('result', ''))
-        task_row_idx += 1
+                if len(cells) > 1:
+                    set_cell_text(cells[-1], task.get('result', ''))
+            else:
+                # Extra template rows beyond our tasks → clear
+                set_cell_text(cells[0], '')
+                if len(cells) > 1:
+                    set_cell_text(cells[-1], '')
 
 
 # =========================================================================
