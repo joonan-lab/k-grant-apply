@@ -31,30 +31,44 @@ GRAY_GANTT_BFR = '82'
 # =========================================================================
 
 def ensure_gray_gantt_bfr(header_xml_bytes):
-    """Add bfr=82 (gray fill + full borders) to header.xml if not present.
+    """Append a gray-fill borderFill at the END of the borderFill list.
 
-    This is identical to bfr=13 (year2/3 default Gantt cell) but with
-    a gray fill color (#C4C4C4) to render the Gantt bar.
+    HWPX resolves borderFillIDRef by POSITION (1-indexed) in the file,
+    not by the id attribute value.  Therefore we must APPEND the new
+    entry so that existing positions 1..N stay intact, and position N+1
+    becomes the new gray-fill entry.
+
+    Returns (new_header_bytes, actual_bfr_id_string) where
+    actual_bfr_id_string is the 1-indexed position to use in
+    borderFillIDRef attributes.
     """
     root = etree.fromstring(header_xml_bytes)
 
-    # Already exists?
-    for bf in root.findall(f'.//{HH}borderFill'):
-        if bf.get('id') == GRAY_GANTT_BFR:
-            return etree.tostring(root, xml_declaration=True,
-                                  encoding='UTF-8', standalone=True)
+    # Collect all borderFill elements from their parent
+    all_bfs = root.findall(f'.//{HH}borderFill')
+    if not all_bfs:
+        return header_xml_bytes, GRAY_GANTT_BFR
 
-    # Find bfr=13 to use as template
+    # The new borderFillIDRef value = position after appending (1-indexed)
+    new_pos = str(len(all_bfs) + 1)
+
+    # Check if we already appended it (last entry has our faceColor)
+    last_bf = all_bfs[-1]
+    last_wb = last_bf.find(f'.//{HH}winBrush')
+    if last_wb is not None and last_wb.get('faceColor') == '#C4C4C4':
+        return header_xml_bytes, new_pos  # already done
+
+    # Use bfr=13 (all-SOLID borders, no fill) as template
     bfr13 = None
-    for bf in root.findall(f'.//{HH}borderFill'):
+    for bf in all_bfs:
         if bf.get('id') == '13':
             bfr13 = bf
             break
     if bfr13 is None:
-        return header_xml_bytes  # can't find template, skip
+        bfr13 = all_bfs[0]  # fallback
 
     new_bf = copy.deepcopy(bfr13)
-    new_bf.set('id', GRAY_GANTT_BFR)
+    new_bf.set('id', new_pos)  # id = new 1-indexed position
 
     # Add gray fillBrush
     fill_brush = etree.SubElement(new_bf, f'{HH}fillBrush')
@@ -63,11 +77,12 @@ def ensure_gray_gantt_bfr(header_xml_bytes):
     win_brush.set('hatchColor', '#000000')
     win_brush.set('alpha', '0')
 
-    parent = bfr13.getparent()
-    parent.insert(list(parent).index(bfr13) + 1, new_bf)
+    # APPEND to parent (never insert in the middle)
+    parent = all_bfs[-1].getparent()
+    parent.append(new_bf)
 
     return etree.tostring(root, xml_declaration=True,
-                          encoding='UTF-8', standalone=True)
+                          encoding='UTF-8', standalone=True), new_pos
 
 
 # =========================================================================
@@ -464,7 +479,7 @@ def fill_yearly_contents(root, data):
 # Schedule table filling
 # =========================================================================
 
-def fill_schedule_table(root, schedule_data, total_years):
+def fill_schedule_table(root, schedule_data, total_years, gray_bfr=None):
     """Fill schedule table task names and results.
 
     The schedule section paragraph contains a paragraph with two nested tables:
@@ -476,6 +491,7 @@ def fill_schedule_table(root, schedule_data, total_years):
     schedule_data: dict with 'year1', 'year2', 'year3' keys,
                    each a list of {'task': str, 'result': str}
     total_years: int (to fix N차년도 labels)
+    gray_bfr: 1-indexed position string for the gray-fill borderFill entry
     """
     schedule_section = find_para_by_text(root, '4) 연구개발과제 수행일정 및 주요 결과물')
     if schedule_section is None:
@@ -493,15 +509,16 @@ def fill_schedule_table(root, schedule_data, total_years):
         if all_tbls:
             # The LAST table in depth-first order is the actual inner Gantt table
             inner_tbl = all_tbls[-1]
-            _fill_schedule_tbl(inner_tbl, schedule_data, total_years)
+            _fill_schedule_tbl(inner_tbl, schedule_data, total_years, gray_bfr)
             return
 
 
-def _shade_gantt_cells(cells, months):
+def _shade_gantt_cells(cells, months, gray_bfr):
     """Set borderFillIDRef to gray for Gantt cells in the active month range.
 
     For year2/3 rows: cells[1]..cells[12] = months 1..12 (each colSpan=2).
     months: [start_month, end_month] (1-indexed, inclusive) or None (no shading).
+    gray_bfr: the 1-indexed position string to use (returned by ensure_gray_gantt_bfr).
     """
     if not months or len(months) < 2:
         return
@@ -509,10 +526,10 @@ def _shade_gantt_cells(cells, months):
     gantt_cells = cells[1:-1]  # cells between task(0) and result(-1)
     for mi, tc in enumerate(gantt_cells, 1):  # mi = month number 1..12
         if start_m <= mi <= end_m:
-            tc.set('borderFillIDRef', GRAY_GANTT_BFR)
+            tc.set('borderFillIDRef', gray_bfr)
 
 
-def _fill_schedule_tbl(tbl, schedule_data, total_years):
+def _fill_schedule_tbl(tbl, schedule_data, total_years, gray_bfr=None):
     """Fill rows in the schedule Gantt table (inner table).
 
     Table structure (template):
@@ -620,8 +637,8 @@ def _fill_schedule_tbl(tbl, schedule_data, total_years):
                 if len(cells) > 1:
                     set_cell_text(cells[-1], task.get('result', ''))
                 # ── Gantt bar shading for year2/3 (not year1) ──
-                if year_key != 'year1':
-                    _shade_gantt_cells(cells, task.get('months'))
+                if year_key != 'year1' and gray_bfr:
+                    _shade_gantt_cells(cells, task.get('months'), gray_bfr)
             else:
                 # Extra template rows beyond our tasks → clear
                 set_cell_text(cells[0], '')
@@ -752,8 +769,9 @@ def modify_application(section_xml, data):
 
     # Step 5: Fill schedule table
     schedule = data.get('schedule', {})
+    gray_bfr = data.get('_gray_bfr')  # injected by write_hwpx() after patching header
     if schedule:
-        fill_schedule_table(root, schedule, total_years)
+        fill_schedule_table(root, schedule, total_years, gray_bfr)
 
     return etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
 
@@ -769,10 +787,18 @@ def write_hwpx(template_path, output_path, data):
         for info in zin.infolist():
             entries[info.filename] = (info, zin.read(info.filename))
 
-    # Patch header.xml: add gray Gantt borderFill (bfr=82) for year2/3 shading
+    # Patch header.xml: APPEND gray Gantt borderFill at the END of the list
+    # Returns the actual 1-indexed position to use in borderFillIDRef
+    gray_bfr = None
     if 'Contents/header.xml' in entries:
         hdr_info, hdr_content = entries['Contents/header.xml']
-        entries['Contents/header.xml'] = (hdr_info, ensure_gray_gantt_bfr(hdr_content))
+        new_hdr, gray_bfr = ensure_gray_gantt_bfr(hdr_content)
+        entries['Contents/header.xml'] = (hdr_info, new_hdr)
+        print(f'  gray Gantt borderFill appended at position {gray_bfr}', file=sys.stderr)
+
+    # Inject gray_bfr into data so modify_application() can pass it to fill_schedule_table()
+    data = dict(data)
+    data['_gray_bfr'] = gray_bfr
 
     section_xml = entries['Contents/section0.xml'][1]
     new_section = modify_application(section_xml, data)
