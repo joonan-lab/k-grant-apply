@@ -20,6 +20,54 @@ from lxml import etree
 
 HP = '{http://www.hancom.co.kr/hwpml/2011/paragraph}'
 HS = '{http://www.hancom.co.kr/hwpml/2011/section}'
+HH = '{http://www.hancom.co.kr/hwpml/2011/head}'
+
+# borderFillIDRef to use for shaded (gray) Gantt bar cells in year2/3
+GRAY_GANTT_BFR = '82'
+
+
+# =========================================================================
+# Header XML helpers (Gantt bar fill)
+# =========================================================================
+
+def ensure_gray_gantt_bfr(header_xml_bytes):
+    """Add bfr=82 (gray fill + full borders) to header.xml if not present.
+
+    This is identical to bfr=13 (year2/3 default Gantt cell) but with
+    a gray fill color (#C4C4C4) to render the Gantt bar.
+    """
+    root = etree.fromstring(header_xml_bytes)
+
+    # Already exists?
+    for bf in root.findall(f'.//{HH}borderFill'):
+        if bf.get('id') == GRAY_GANTT_BFR:
+            return etree.tostring(root, xml_declaration=True,
+                                  encoding='UTF-8', standalone=True)
+
+    # Find bfr=13 to use as template
+    bfr13 = None
+    for bf in root.findall(f'.//{HH}borderFill'):
+        if bf.get('id') == '13':
+            bfr13 = bf
+            break
+    if bfr13 is None:
+        return header_xml_bytes  # can't find template, skip
+
+    new_bf = copy.deepcopy(bfr13)
+    new_bf.set('id', GRAY_GANTT_BFR)
+
+    # Add gray fillBrush
+    fill_brush = etree.SubElement(new_bf, f'{HH}fillBrush')
+    win_brush = etree.SubElement(fill_brush, f'{HH}winBrush')
+    win_brush.set('faceColor', '#C4C4C4')
+    win_brush.set('hatchColor', '#000000')
+    win_brush.set('alpha', '0')
+
+    parent = bfr13.getparent()
+    parent.insert(list(parent).index(bfr13) + 1, new_bf)
+
+    return etree.tostring(root, xml_declaration=True,
+                          encoding='UTF-8', standalone=True)
 
 
 # =========================================================================
@@ -449,6 +497,21 @@ def fill_schedule_table(root, schedule_data, total_years):
             return
 
 
+def _shade_gantt_cells(cells, months):
+    """Set borderFillIDRef to gray for Gantt cells in the active month range.
+
+    For year2/3 rows: cells[1]..cells[12] = months 1..12 (each colSpan=2).
+    months: [start_month, end_month] (1-indexed, inclusive) or None (no shading).
+    """
+    if not months or len(months) < 2:
+        return
+    start_m, end_m = int(months[0]), int(months[1])
+    gantt_cells = cells[1:-1]  # cells between task(0) and result(-1)
+    for mi, tc in enumerate(gantt_cells, 1):  # mi = month number 1..12
+        if start_m <= mi <= end_m:
+            tc.set('borderFillIDRef', GRAY_GANTT_BFR)
+
+
 def _fill_schedule_tbl(tbl, schedule_data, total_years):
     """Fill rows in the schedule Gantt table (inner table).
 
@@ -556,6 +619,9 @@ def _fill_schedule_tbl(tbl, schedule_data, total_years):
                 set_cell_text(cells[0], task.get('task', ''))
                 if len(cells) > 1:
                     set_cell_text(cells[-1], task.get('result', ''))
+                # ── Gantt bar shading for year2/3 (not year1) ──
+                if year_key != 'year1':
+                    _shade_gantt_cells(cells, task.get('months'))
             else:
                 # Extra template rows beyond our tasks → clear
                 set_cell_text(cells[0], '')
@@ -702,6 +768,11 @@ def write_hwpx(template_path, output_path, data):
     with zipfile.ZipFile(template_path, 'r') as zin:
         for info in zin.infolist():
             entries[info.filename] = (info, zin.read(info.filename))
+
+    # Patch header.xml: add gray Gantt borderFill (bfr=82) for year2/3 shading
+    if 'Contents/header.xml' in entries:
+        hdr_info, hdr_content = entries['Contents/header.xml']
+        entries['Contents/header.xml'] = (hdr_info, ensure_gray_gantt_bfr(hdr_content))
 
     section_xml = entries['Contents/section0.xml'][1]
     new_section = modify_application(section_xml, data)
