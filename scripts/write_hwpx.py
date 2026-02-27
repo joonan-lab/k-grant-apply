@@ -547,28 +547,8 @@ def _fill_schedule_tbl(tbl, schedule_data, total_years):
             # year2, year3: all collected rows are task rows (14 cells each)
             writable = task_rows
 
-        # ── Clone rows if we need more than available ──
-        if tasks and task_rows and len(writable) < len(tasks):
-            needed = len(tasks) - len(writable)
-            template_row, template_cells = task_rows[-1]
-            parent_tbl = template_row.getparent()
-            if parent_tbl is not None:
-                last_row = template_row
-                for _ in range(needed):
-                    new_row = copy.deepcopy(template_row)
-                    # Clear all text in the cloned row
-                    for t in new_row.iter(HP + 't'):
-                        t.text = ''
-                    # Remove linesegarray caches
-                    for lsa in new_row.findall('.//' + HP + 'linesegarray'):
-                        lsa.getparent().remove(lsa)
-                    last_idx = list(parent_tbl).index(last_row)
-                    parent_tbl.insert(last_idx + 1, new_row)
-                    last_row = new_row
-                    new_cells = [c for c in new_row if c.tag == HP + 'tc']
-                    writable.append((new_row, new_cells))
-
         # ── Fill writable rows ──
+        # (Template is pre-expanded to 9 rows for year2/3; no runtime cloning needed)
         for i, (row, cells) in enumerate(writable):
             strip_linesegarray(row)
             if i < len(tasks):

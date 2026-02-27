@@ -19,12 +19,14 @@ RFP(사업공고문) 기반 맞춤 작성, 연차·단계 자동 확장, 수행�
 
 ```
 k-grant-apply/
-├── SKILL.md              ← Claude Code 스킬 정의 (트리거·워크플로우·작성 기준)
+├── SKILL.md                   ← Claude Code 스킬 정의 (트리거·워크플로우·작성 기준)
 ├── README.md
 ├── assets/
-│   └── application.hwpx  ← NRF 표준 연구계획서 양식 템플릿
+│   ├── application.hwpx       ← NRF 표준 연구계획서 양식 (2·3차년도 Gantt 9행 pre-expanded)
+│   └── application.hwpx.bak   ← 원본 백업
 └── scripts/
-    └── write_hwpx.py     ← HWPX 생성 Python 스크립트
+    ├── write_hwpx.py          ← HWPX 생성 Python 스크립트 (텍스트 채움 전용)
+    └── expand_template.py     ← 템플릿 Gantt 행 사전 확장 스크립트
 ```
 
 ## 설치 방법
